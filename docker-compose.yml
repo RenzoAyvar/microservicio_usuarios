@@ -1,0 +1,42 @@
+version: '3.9'
+
+services:
+  mariadb:
+    image: mariadb:11.8.9
+    container_name: app_pagos_mariadb
+    environment:
+      MARIADB_DATABASE: app_pagos_usuarios
+      MARIADB_USER: appuser
+      MARIADB_PASSWORD: password
+      MARIADB_ROOT_PASSWORD: rootpassword
+    ports:
+      - "3306:3306"
+    volumes:
+      - mariadb_data:/var/lib/mysql
+
+  app:
+    build: .
+    container_name: app_pagos_users
+    environment:
+      DATABASE_URL: mysql+pymysql://appuser:password@mariadb:3306/app_pagos_usuarios
+      JWT_SECRET_KEY: change-this-secret-key
+      JWT_ALGORITHM: HS256
+      ACCESS_TOKEN_EXPIRE_HOURS: 3
+      CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+    depends_on:
+      - mariadb
+    ports:
+      - "8000:8000"
+
+  nginx:
+    image: nginx:stable-alpine
+    container_name: app_pagos_gateway
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+
+volumes:
+  mariadb_data:
