@@ -19,3 +19,5 @@ htmlcov
 tests
 docs
 specs
+*.rendered.yaml
+k8s/*.rendered.yaml

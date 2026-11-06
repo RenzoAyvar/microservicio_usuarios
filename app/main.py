@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime
+from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -67,8 +68,8 @@ def serialize_user(user: Usuario) -> dict:
     }
 
 
-@app.on_event("startup")
-def startup_event() -> None:
+@asynccontextmanager
+async def lifespan(_: FastAPI):
     validate_settings()
     _load_internal_consumers()
     Base.metadata.create_all(bind=engine)
@@ -77,6 +78,10 @@ def startup_event() -> None:
         ensure_default_roles(db)
     finally:
         db.close()
+    yield
+
+
+app.router.lifespan_context = lifespan
 
 
 @app.get("/api/health")

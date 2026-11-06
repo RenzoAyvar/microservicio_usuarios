@@ -16,8 +16,9 @@ from fastapi.testclient import TestClient
 from app.database import Base, SessionLocal, engine
 from app.main import app
 from app.models import Usuario
+from app.config import Settings, validate_settings
 
-client = TestClient(app)
+client = TestClient(app, raise_server_exceptions=False)
 
 
 def reset_db() -> None:
@@ -169,6 +170,12 @@ def test_internal_endpoint_requires_api_key_and_permission() -> None:
     missing = client.get("/internal/users/999")
     assert missing.status_code == 401
 
+    invalid = client.get(
+        "/internal/users/999",
+        headers={"X-API-Key": "api-key-invalida"},
+    )
+    assert invalid.status_code == 401
+
     forbidden = client.get(
         "/internal/users/999",
         headers={"X-API-Key": "reportes-api-key"},
@@ -253,3 +260,39 @@ def test_nginx_blocks_external_internal_routes() -> None:
 
     assert "location ^~ /internal/" in nginx_config
     assert "return 404;" in nginx_config
+
+
+def test_fastapi_lifespan_starts_and_stops() -> None:
+    with TestClient(app) as lifecycle_client:
+        response = lifecycle_client.get("/api/live")
+    assert response.status_code == 200
+
+
+def test_production_rejects_sqlite() -> None:
+    candidate = Settings(
+        _env_file=None,
+        database_url="sqlite:///./insecure.db",
+        jwt_secret_key="secure-test-secret",
+        internal_service_credentials='{"pagos":{"key_hashes":["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],"permissions":["users:read_status"],"enabled":true}}',
+        app_env="production",
+    )
+    try:
+        validate_settings(candidate)
+        assert False, "La configuración debería rechazarse"
+    except RuntimeError as exc:
+        assert "SQLite" in str(exc)
+
+
+def test_production_rejects_default_jwt_secret() -> None:
+    candidate = Settings(
+        _env_file=None,
+        database_url="mysql+pymysql://app:secret@mariadb:3306/app_pagos_usuarios",
+        jwt_secret_key="change-this-secret-key",
+        internal_service_credentials='{"pagos":{"key_hashes":["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],"permissions":["users:read_status"],"enabled":true}}',
+        app_env="production",
+    )
+    try:
+        validate_settings(candidate)
+        assert False, "La configuración debería rechazarse"
+    except RuntimeError as exc:
+        assert "JWT_SECRET_KEY" in str(exc)

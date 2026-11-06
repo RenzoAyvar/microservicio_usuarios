@@ -32,17 +32,20 @@ class Settings(BaseSettings):
 settings = Settings()
 
 
-def validate_settings() -> None:
+def validate_settings(candidate: Settings | None = None) -> None:
+    configured = candidate or settings
     missing = []
-    if not settings.database_url:
+    if not configured.database_url:
         missing.append("DATABASE_URL")
-    if not settings.jwt_secret_key:
+    if not configured.jwt_secret_key:
         missing.append("JWT_SECRET_KEY")
-    if not settings.internal_service_credentials or settings.internal_service_credentials == "{}":
+    if not configured.internal_service_credentials or configured.internal_service_credentials == "{}":
         missing.append("INTERNAL_SERVICE_CREDENTIALS")
     if missing:
         raise RuntimeError(f"Variables de entorno criticas no configuradas: {', '.join(missing)}")
-    if settings.app_env.lower() == "production" and settings.database_url.startswith("sqlite"):
+    if configured.app_env.lower() == "production" and configured.database_url.startswith("sqlite"):
         raise RuntimeError("SQLite no esta permitido en produccion")
-    if settings.app_env.lower() == "production" and settings.jwt_secret_key == "change-this-secret-key":
+    if configured.app_env.lower() == "production" and configured.jwt_secret_key == "change-this-secret-key":
         raise RuntimeError("JWT_SECRET_KEY debe ser reemplazado en produccion")
+    if configured.app_env.lower() == "production" and "*" in configured.cors_origins_list:
+        raise RuntimeError("CORS_ORIGINS no puede usar comodines en produccion")
