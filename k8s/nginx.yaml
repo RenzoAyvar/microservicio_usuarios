@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-config
+  namespace: app-pagos
+data:
+  nginx.conf: |
+    events {}
+
+    http {
+        upstream users_api {
+            server users-api:8000;
+        }
+
+        server {
+            listen 80;
+            server_name _;
+
+            location = /internal {
+                return 404;
+            }
+
+            location ^~ /internal/ {
+                return 404;
+            }
+
+            location / {
+                proxy_pass http://users_api;
+                proxy_set_header Host $host;
+                proxy_set_header X-Real-IP $remote_addr;
+                proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+                proxy_set_header X-Forwarded-Proto $scheme;
+            }
+        }
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: users-gateway
+  namespace: app-pagos
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: users-gateway
+  template:
+    metadata:
+      labels:
+        app: users-gateway
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:stable-alpine
+          ports:
+            - name: http
+              containerPort: 80
+          volumeMounts:
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: nginx-config
+          configMap:
+            name: nginx-config
+            items:
+              - key: nginx.conf
+                path: nginx.conf
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: users-gateway
+  namespace: app-pagos
+spec:
+  type: ClusterIP
+  selector:
+    app: users-gateway
+  ports:
+    - name: http
+      port: 80
+      targetPort: http

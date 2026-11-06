@@ -1,0 +1,86 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: users-api
+  namespace: app-pagos
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: users-api
+  template:
+    metadata:
+      labels:
+        app: users-api
+    spec:
+      containers:
+        - name: users-api
+          image: REPLACE_WITH_ECR_IMAGE_URI
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: users-secrets
+                  key: DATABASE_URL
+            - name: JWT_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: users-secrets
+                  key: JWT_SECRET_KEY
+            - name: INTERNAL_SERVICE_CREDENTIALS
+              valueFrom:
+                secretKeyRef:
+                  name: users-secrets
+                  key: INTERNAL_SERVICE_CREDENTIALS
+            - name: JWT_ALGORITHM
+              valueFrom:
+                configMapKeyRef:
+                  name: users-config
+                  key: JWT_ALGORITHM
+            - name: ACCESS_TOKEN_EXPIRE_HOURS
+              valueFrom:
+                configMapKeyRef:
+                  name: users-config
+                  key: ACCESS_TOKEN_EXPIRE_HOURS
+            - name: CORS_ORIGINS
+              valueFrom:
+                configMapKeyRef:
+                  name: users-config
+                  key: CORS_ORIGINS
+          readinessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health
+              port: http
+            initialDelaySeconds: 20
+            periodSeconds: 20
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: users-api
+  namespace: app-pagos
+spec:
+  type: ClusterIP
+  selector:
+    app: users-api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

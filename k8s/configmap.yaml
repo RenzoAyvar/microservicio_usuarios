@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: users-config
+  namespace: app-pagos
+data:
+  JWT_ALGORITHM: "HS256"
+  ACCESS_TOKEN_EXPIRE_HOURS: "3"
+  CORS_ORIGINS: "https://example.invalid"
+  MARIADB_DATABASE: "app_pagos_usuarios"
+  MARIADB_USER: "appuser"

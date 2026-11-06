@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_hours: int = 3
     cors_origins: str = "http://localhost:3000,http://127.0.0.1:3000"
+    internal_service_credentials: str = "{}"
 
     model_config = SettingsConfigDict(
         env_file=ROOT_DIR / ".env",

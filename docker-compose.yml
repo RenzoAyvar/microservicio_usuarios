@@ -23,6 +23,7 @@ services:
       JWT_ALGORITHM: HS256
       ACCESS_TOKEN_EXPIRE_HOURS: 3
       CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+      INTERNAL_SERVICE_CREDENTIALS: ${INTERNAL_SERVICE_CREDENTIALS:-{}}
     depends_on:
       - mariadb
     ports:

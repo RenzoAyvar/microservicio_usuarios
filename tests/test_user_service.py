@@ -2,17 +2,20 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from app.deps import api_key_fingerprint
 
 os.environ.setdefault("DATABASE_URL", "sqlite:///./test_app_pagos_usuarios.db")
 os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key")
 os.environ.setdefault("JWT_ALGORITHM", "HS256")
 os.environ.setdefault("ACCESS_TOKEN_EXPIRE_HOURS", "3")
 os.environ.setdefault("CORS_ORIGINS", "http://localhost:3000")
+os.environ.setdefault("INTERNAL_SERVICE_CREDENTIALS", '{"pagos-service":{"key_hashes":["test-key-hash"],"permissions":["users:read_status"],"enabled":true}}')
 
 from fastapi.testclient import TestClient
 
-from app.database import Base, engine
+from app.database import Base, SessionLocal, engine
 from app.main import app
+from app.models import Usuario
 
 client = TestClient(app)
 
@@ -20,6 +23,14 @@ client = TestClient(app)
 def reset_db() -> None:
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
+
+def set_service_credentials() -> None:
+    from app.config import settings
+    settings.internal_service_credentials = (
+        '{"pagos-service":{"key_hashes":["%s"],"permissions":["users:read_status"],"enabled":true},'
+        '"reportes-service":{"key_hashes":["%s"],"permissions":[],"enabled":true}}'
+        % (api_key_fingerprint("pagos-api-key"), api_key_fingerprint("reportes-api-key"))
+    )
 
 
 def test_register_login_and_profile_flow() -> None:
@@ -122,3 +133,73 @@ def test_login_lockout_after_three_failures() -> None:
     )
     assert locked.status_code == 401
     assert "Credenciales incorrectas" in locked.json()["detail"]
+
+
+def test_internal_user_status() -> None:
+    reset_db()
+    set_service_credentials()
+    payload = {
+        "nombre": "Lucia",
+        "apellido": "Perez",
+        "email": "lucia@example.com",
+        "password": "ClaveSegura1",
+        "telefono": "5551112222",
+        "fecha_nacimiento": "1993-03-03",
+    }
+    registration = client.post("/api/auth/register", json=payload)
+    user_id = registration.json()["id_usuario"]
+
+    response = client.get(
+        f"/internal/users/{user_id}",
+        headers={"X-API-Key": "pagos-api-key"},
+    )
+    assert response.status_code == 200
+    assert response.json() == {"id_usuario": user_id, "estado": True}
+
+
+def test_internal_endpoint_requires_api_key_and_permission() -> None:
+    reset_db()
+    set_service_credentials()
+
+    missing = client.get("/internal/users/999")
+    assert missing.status_code == 401
+
+    forbidden = client.get(
+        "/internal/users/999",
+        headers={"X-API-Key": "reportes-api-key"},
+    )
+    assert forbidden.status_code == 403
+
+
+def test_internal_user_status_distinguishes_inactive_and_missing() -> None:
+    reset_db()
+    set_service_credentials()
+    payload = {
+        "nombre": "Sofia",
+        "apellido": "Diaz",
+        "email": "sofia@example.com",
+        "password": "ClaveSegura1",
+        "telefono": "5553334444",
+        "fecha_nacimiento": "1991-01-01",
+    }
+    registration = client.post("/api/auth/register", json=payload)
+    user_id = registration.json()["id_usuario"]
+
+    db = SessionLocal()
+    db_user = db.query(Usuario).filter(Usuario.id_usuario == user_id).first()
+    db_user.estado = False
+    db.commit()
+    db.close()
+
+    inactive = client.get(
+        f"/internal/users/{user_id}",
+        headers={"X-API-Key": "pagos-api-key"},
+    )
+    assert inactive.status_code == 200
+    assert inactive.json() == {"id_usuario": user_id, "estado": False}
+
+    missing = client.get(
+        "/internal/users/999999",
+        headers={"X-API-Key": "pagos-api-key"},
+    )
+    assert missing.status_code == 404

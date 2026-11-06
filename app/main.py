@@ -9,9 +9,9 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import SessionLocal, Base, engine, get_db
-from app.deps import get_current_user
+from app.deps import get_current_user, require_service_permission, _load_internal_consumers
 from app.models import Role, Usuario
-from app.schemas import LoginRequest, MessageResponse, TokenResponse, UserCreate, UserPublic, UserUpdate
+from app.schemas import InternalUserStatus, LoginRequest, MessageResponse, TokenResponse, UserCreate, UserPublic, UserUpdate
 from app.security import clear_failed_attempts, create_access_token, hash_password, is_account_locked, register_failed_attempt, verify_password
 
 app = FastAPI(title=settings.app_name, version="0.1.0")
@@ -68,6 +68,7 @@ def serialize_user(user: Usuario) -> dict:
 
 @app.on_event("startup")
 def startup_event() -> None:
+    _load_internal_consumers()
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
@@ -174,3 +175,15 @@ def update_current_user_profile(
     db.refresh(current_user)
     current_user.rol = db.query(Role).filter(Role.id_rol == current_user.id_rol).first()
     return serialize_user(current_user)
+
+
+@app.get("/internal/users/{id_usuario}", response_model=InternalUserStatus)
+def get_internal_user_status(
+    id_usuario: int,
+    consumer_id: str = Depends(require_service_permission("users:read_status")),
+    db: Session = Depends(get_db),
+) -> dict:
+    user = db.query(Usuario).filter(Usuario.id_usuario == id_usuario).first()
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado")
+    return {"id_usuario": user.id_usuario, "estado": bool(user.estado)}

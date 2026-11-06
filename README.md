@@ -36,6 +36,17 @@ La documentación interactiva queda en:
 - `GET /api/users/me`
 - `PUT /api/users/me`
 - `GET /api/health`
+- `GET /internal/users/{id_usuario}` (API Key de microservicio)
+
+## Integración interna
+
+Las solicitudes internas requieren la cabecera `X-API-Key`. El servicio de usuarios
+asocia cada consumidor, sus huellas de API Key y permisos mediante
+`INTERNAL_SERVICE_CREDENTIALS`.
+
+La consulta interna requiere el permiso `users:read_status`. Las API Keys reales
+no deben incluirse en el repositorio ni en esta configuración; solo deben
+registrarse sus huellas SHA-256.
 
 ## Pruebas
 

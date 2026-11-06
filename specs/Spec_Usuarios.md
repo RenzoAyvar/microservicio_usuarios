@@ -128,6 +128,12 @@ Reglas:
 
 El cambio de contraseña podrá añadirse como una funcionalidad independiente en una versión posterior.
 
+RF-05 Consultar internamente un usuario mediante id_usuario.
+RF-06 Permitir que microservicios autorizados consulten el estado de un usuario.
+RF-07 Autenticar y autorizar las solicitudes entre microservicios.
+RNF-01 La comunicación interna utilizará Kubernetes Services y DNS interno.
+RNF-02 Las credenciales de integración se gestionarán mediante variables de entorno o Secrets.
+
 ## 6. Modelo de datos
 
 La base de datos MariaDB se llamará `app_pagos_usuarios`.

@@ -60,3 +60,8 @@ class TokenResponse(BaseModel):
 
 class MessageResponse(BaseModel):
     message: str
+
+
+class InternalUserStatus(BaseModel):
+    id_usuario: int
+    estado: bool
