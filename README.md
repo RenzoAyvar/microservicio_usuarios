@@ -48,6 +48,24 @@ La consulta interna requiere el permiso `users:read_status`. Las API Keys reales
 no deben incluirse en el repositorio ni en esta configuración; solo deben
 registrarse sus huellas SHA-256.
 
+## Variables de entorno
+
+| Variable | Obligatoria | Descripción |
+|---|---:|---|
+| `DATABASE_URL` | Sí | URL SQLAlchemy de MariaDB; SQLite solo puede usarse fuera de producción |
+| `JWT_SECRET_KEY` | Sí | Secreto usado para firmar JWT |
+| `JWT_ALGORITHM` | Sí | Algoritmo JWT, normalmente `HS256` |
+| `ACCESS_TOKEN_EXPIRE_HOURS` | Sí | Duración de los tokens JWT |
+| `INTERNAL_SERVICE_CREDENTIALS` | Sí | JSON con consumidores, hashes SHA-256, permisos y estado |
+| `CORS_ORIGINS` | Sí | Lista separada por comas de orígenes permitidos |
+| `APP_ENV` | No | `development`, `test` o `production` |
+
+## Health checks
+
+- `/api/live`: indica si el proceso FastAPI está vivo.
+- `/api/ready`: verifica la conexión con la base de datos.
+- `/api/health`: endpoint general compatible con instalaciones existentes.
+
 ## Pruebas
 
 ```bash

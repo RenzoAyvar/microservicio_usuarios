@@ -7,6 +7,8 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 
 from app.config import settings
 
+if not settings.database_url:
+    raise RuntimeError("DATABASE_URL no esta configurada")
 connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
 engine = create_engine(settings.database_url, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

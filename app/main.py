@@ -5,9 +5,10 @@ from datetime import datetime
 
 from fastapi import Depends, FastAPI, HTTPException, status
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
-from app.config import settings
+from app.config import settings, validate_settings
 from app.database import SessionLocal, Base, engine, get_db
 from app.deps import get_current_user, require_service_permission, _load_internal_consumers
 from app.models import Role, Usuario
@@ -68,6 +69,7 @@ def serialize_user(user: Usuario) -> dict:
 
 @app.on_event("startup")
 def startup_event() -> None:
+    validate_settings()
     _load_internal_consumers()
     Base.metadata.create_all(bind=engine)
     db = SessionLocal()
@@ -80,6 +82,20 @@ def startup_event() -> None:
 @app.get("/api/health")
 def health() -> dict:
     return {"status": "ok"}
+
+
+@app.get("/api/live")
+def liveness() -> dict:
+    return {"status": "alive"}
+
+
+@app.get("/api/ready")
+def readiness(db: Session = Depends(get_db)) -> dict:
+    try:
+        db.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Base de datos no disponible") from exc
+    return {"status": "ready"}
 
 
 @app.post("/api/auth/register", status_code=status.HTTP_201_CREATED, response_model=UserPublic)

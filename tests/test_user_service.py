@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+
+os.environ["DATABASE_URL"] = "sqlite:///./test_app_pagos_usuarios.db"
+os.environ["JWT_SECRET_KEY"] = "test-secret-key"
+os.environ["JWT_ALGORITHM"] = "HS256"
+os.environ["ACCESS_TOKEN_EXPIRE_HOURS"] = "3"
+os.environ["CORS_ORIGINS"] = "http://localhost:3000"
+os.environ["INTERNAL_SERVICE_CREDENTIALS"] = '{"pagos-service":{"key_hashes":["test-key-hash"],"permissions":["users:read_status"],"enabled":true}}'
+
 from app.deps import api_key_fingerprint
-
-os.environ.setdefault("DATABASE_URL", "sqlite:///./test_app_pagos_usuarios.db")
-os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key")
-os.environ.setdefault("JWT_ALGORITHM", "HS256")
-os.environ.setdefault("ACCESS_TOKEN_EXPIRE_HOURS", "3")
-os.environ.setdefault("CORS_ORIGINS", "http://localhost:3000")
-os.environ.setdefault("INTERNAL_SERVICE_CREDENTIALS", '{"pagos-service":{"key_hashes":["test-key-hash"],"permissions":["users:read_status"],"enabled":true}}')
-
 from fastapi.testclient import TestClient
 
 from app.database import Base, SessionLocal, engine
@@ -28,8 +28,13 @@ def set_service_credentials() -> None:
     from app.config import settings
     settings.internal_service_credentials = (
         '{"pagos-service":{"key_hashes":["%s"],"permissions":["users:read_status"],"enabled":true},'
-        '"reportes-service":{"key_hashes":["%s"],"permissions":[],"enabled":true}}'
-        % (api_key_fingerprint("pagos-api-key"), api_key_fingerprint("reportes-api-key"))
+        '"reportes-service":{"key_hashes":["%s"],"permissions":[],"enabled":true},'
+        '"deshabilitado-service":{"key_hashes":["%s"],"permissions":["users:read_status"],"enabled":false}}'
+        % (
+            api_key_fingerprint("pagos-api-key"),
+            api_key_fingerprint("reportes-api-key"),
+            api_key_fingerprint("deshabilitado-api-key"),
+        )
     )
 
 
@@ -171,6 +176,44 @@ def test_internal_endpoint_requires_api_key_and_permission() -> None:
     assert forbidden.status_code == 403
 
 
+def test_internal_endpoint_rejects_disabled_consumer() -> None:
+    reset_db()
+    set_service_credentials()
+
+    response = client.get(
+        "/internal/users/999",
+        headers={"X-API-Key": "deshabilitado-api-key"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_internal_endpoint_hides_personal_data() -> None:
+    reset_db()
+    set_service_credentials()
+    payload = {
+        "nombre": "Privada",
+        "apellido": "Persona",
+        "email": "privada@example.com",
+        "password": "ClaveSegura1",
+        "telefono": "5559998888",
+        "fecha_nacimiento": "1990-01-01",
+    }
+    registration = client.post("/api/auth/register", json=payload)
+    user_id = registration.json()["id_usuario"]
+
+    response = client.get(
+        f"/internal/users/{user_id}",
+        headers={"X-API-Key": "pagos-api-key"},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"id_usuario": user_id, "estado": True}
+    assert "email" not in response.text
+    assert "nombre" not in response.text
+    assert "telefono" not in response.text
+
+
 def test_internal_user_status_distinguishes_inactive_and_missing() -> None:
     reset_db()
     set_service_credentials()
@@ -203,3 +246,10 @@ def test_internal_user_status_distinguishes_inactive_and_missing() -> None:
         headers={"X-API-Key": "pagos-api-key"},
     )
     assert missing.status_code == 404
+
+
+def test_nginx_blocks_external_internal_routes() -> None:
+    nginx_config = Path("nginx.conf").read_text(encoding="utf-8")
+
+    assert "location ^~ /internal/" in nginx_config
+    assert "return 404;" in nginx_config

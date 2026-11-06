@@ -13,6 +13,11 @@ services:
       - "3306:3306"
     volumes:
       - mariadb_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD-SHELL", "mariadb-admin ping -h localhost -u root -p$${MARIADB_ROOT_PASSWORD} --silent"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
 
   app:
     build: .
@@ -25,7 +30,13 @@ services:
       CORS_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
       INTERNAL_SERVICE_CREDENTIALS: ${INTERNAL_SERVICE_CREDENTIALS:-{}}
     depends_on:
-      - mariadb
+      mariadb:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/api/live')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
     ports:
       - "8000:8000"
 

@@ -105,9 +105,10 @@ def require_service_permission(permission: str):
         consumer_id = ""
         permissions: set[str] = set()
         matched = False
+        enabled = True
 
         for candidate_id, candidate in consumers.items():
-            if not isinstance(candidate, dict) or not candidate.get("enabled", False):
+            if not isinstance(candidate, dict):
                 continue
             key_hashes = candidate.get("key_hashes", [])
             if not isinstance(key_hashes, list):
@@ -115,6 +116,7 @@ def require_service_permission(permission: str):
             candidate_matched = _secure_fingerprint_matches(x_api_key, key_hashes)
             if candidate_matched:
                 consumer_id = candidate_id
+                enabled = candidate.get("enabled") is True
                 candidate_permissions = candidate.get("permissions", [])
                 if isinstance(candidate_permissions, list):
                     permissions = set(candidate_permissions)
@@ -122,6 +124,8 @@ def require_service_permission(permission: str):
 
         if not matched:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Credenciales de servicio invalidas")
+        if not enabled:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Consumidor interno deshabilitado")
         if permission not in permissions:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Permiso insuficiente")
         return consumer_id
