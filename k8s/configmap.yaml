@@ -6,7 +6,6 @@ metadata:
 data:
   JWT_ALGORITHM: "HS256"
   ACCESS_TOKEN_EXPIRE_HOURS: "3"
-  # Example only; replace with the real browser frontend origin before deployment.
-  CORS_ORIGINS: "http://localhost:3000"
+  CORS_ORIGINS: ""
   MARIADB_DATABASE: "app_pagos_usuarios"
   MARIADB_USER: "appuser"

@@ -1,0 +1,4 @@
+MariaDB application: userroot
+MariaDB root: rootpass
+JWT:KMTwjDtO2eqnWoc4aPgqHh4TQC8hPu22lkTUYjdMd25
+api key:LLcz7c@$jcp1$1e2#^PvK9MmXBXzawei$FJq@BPJ2pY=
