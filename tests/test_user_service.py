@@ -1,45 +1,77 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+from collections.abc import Iterator
 from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
 
 os.environ["DATABASE_URL"] = "sqlite:///./test_app_pagos_usuarios.db"
 os.environ["JWT_SECRET_KEY"] = "test-secret-key"
 os.environ["JWT_ALGORITHM"] = "HS256"
 os.environ["ACCESS_TOKEN_EXPIRE_HOURS"] = "3"
 os.environ["CORS_ORIGINS"] = "http://localhost:3000"
-os.environ["INTERNAL_SERVICE_CREDENTIALS"] = '{"pagos-service":{"key_hashes":["test-key-hash"],"permissions":["users:read_status"],"enabled":true}}'
-
-from app.deps import api_key_fingerprint
-from fastapi.testclient import TestClient
+TEST_API_KEYS = {
+    "pagos-service": "pagos-api-key",
+    "reportes-service": "reportes-api-key",
+    "deshabilitado-service": "deshabilitado-api-key",
+}
+TEST_SERVICE_CREDENTIALS = json.dumps(
+    {
+        "pagos-service": {
+            "key_hashes": [hashlib.sha256(TEST_API_KEYS["pagos-service"].encode()).hexdigest()],
+            "permissions": ["users:read_status"],
+            "enabled": True,
+        },
+        "reportes-service": {
+            "key_hashes": [hashlib.sha256(TEST_API_KEYS["reportes-service"].encode()).hexdigest()],
+            "permissions": [],
+            "enabled": True,
+        },
+        "deshabilitado-service": {
+            "key_hashes": [hashlib.sha256(TEST_API_KEYS["deshabilitado-service"].encode()).hexdigest()],
+            "permissions": ["users:read_status"],
+            "enabled": False,
+        },
+    }
+)
+os.environ["INTERNAL_SERVICE_CREDENTIALS"] = TEST_SERVICE_CREDENTIALS
 
 from app.database import Base, SessionLocal, engine
+from app.config import Settings, settings, validate_settings
+from app.deps import _load_internal_consumers
 from app.main import app
 from app.models import Usuario
-from app.config import Settings, validate_settings
 
-client = TestClient(app, raise_server_exceptions=False)
+
+@pytest.fixture(autouse=True)
+def reset_service_state(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    monkeypatch.setattr(settings, "internal_service_credentials", TEST_SERVICE_CREDENTIALS)
+    monkeypatch.setattr(settings, "database_url", os.environ["DATABASE_URL"])
+    monkeypatch.setattr(settings, "jwt_secret_key", os.environ["JWT_SECRET_KEY"])
+    monkeypatch.setattr(settings, "app_env", "test")
+    from app.security import FAILED_LOGINS
+
+    FAILED_LOGINS.clear()
+    yield
+    FAILED_LOGINS.clear()
+
+
+@pytest.fixture
+def client(reset_service_state: None) -> Iterator[TestClient]:
+    with TestClient(app, raise_server_exceptions=False) as test_client:
+        yield test_client
 
 
 def reset_db() -> None:
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 
-def set_service_credentials() -> None:
-    from app.config import settings
-    settings.internal_service_credentials = (
-        '{"pagos-service":{"key_hashes":["%s"],"permissions":["users:read_status"],"enabled":true},'
-        '"reportes-service":{"key_hashes":["%s"],"permissions":[],"enabled":true},'
-        '"deshabilitado-service":{"key_hashes":["%s"],"permissions":["users:read_status"],"enabled":false}}'
-        % (
-            api_key_fingerprint("pagos-api-key"),
-            api_key_fingerprint("reportes-api-key"),
-            api_key_fingerprint("deshabilitado-api-key"),
-        )
-    )
 
-
-def test_register_login_and_profile_flow() -> None:
+def test_register_login_and_profile_flow(client: TestClient) -> None:
     reset_db()
     payload = {
         "nombre": "Ana",
@@ -81,7 +113,7 @@ def test_register_login_and_profile_flow() -> None:
     assert update_response.json()["telefono"] == "5550001111"
 
 
-def test_duplicate_email_is_rejected() -> None:
+def test_duplicate_email_is_rejected(client: TestClient) -> None:
     reset_db()
     payload = {
         "nombre": "Luis",
@@ -97,7 +129,7 @@ def test_duplicate_email_is_rejected() -> None:
     assert second.status_code == 409
 
 
-def test_invalid_password_is_rejected() -> None:
+def test_invalid_password_is_rejected(client: TestClient) -> None:
     reset_db()
     response = client.post(
         "/api/auth/register",
@@ -113,7 +145,7 @@ def test_invalid_password_is_rejected() -> None:
     assert response.status_code == 400
 
 
-def test_login_lockout_after_three_failures() -> None:
+def test_login_lockout_after_three_failures(client: TestClient) -> None:
     reset_db()
     payload = {
         "nombre": "Javier",
@@ -141,9 +173,8 @@ def test_login_lockout_after_three_failures() -> None:
     assert "Credenciales incorrectas" in locked.json()["detail"]
 
 
-def test_internal_user_status() -> None:
+def test_internal_user_status(client: TestClient) -> None:
     reset_db()
-    set_service_credentials()
     payload = {
         "nombre": "Lucia",
         "apellido": "Perez",
@@ -163,9 +194,8 @@ def test_internal_user_status() -> None:
     assert response.json() == {"id_usuario": user_id, "estado": True}
 
 
-def test_internal_endpoint_requires_api_key_and_permission() -> None:
+def test_internal_endpoint_requires_api_key_and_permission(client: TestClient) -> None:
     reset_db()
-    set_service_credentials()
 
     missing = client.get("/internal/users/999")
     assert missing.status_code == 401
@@ -183,9 +213,8 @@ def test_internal_endpoint_requires_api_key_and_permission() -> None:
     assert forbidden.status_code == 403
 
 
-def test_internal_endpoint_rejects_disabled_consumer() -> None:
+def test_internal_endpoint_rejects_disabled_consumer(client: TestClient) -> None:
     reset_db()
-    set_service_credentials()
 
     response = client.get(
         "/internal/users/999",
@@ -195,9 +224,8 @@ def test_internal_endpoint_rejects_disabled_consumer() -> None:
     assert response.status_code == 403
 
 
-def test_internal_endpoint_hides_personal_data() -> None:
+def test_internal_endpoint_hides_personal_data(client: TestClient) -> None:
     reset_db()
-    set_service_credentials()
     payload = {
         "nombre": "Privada",
         "apellido": "Persona",
@@ -221,9 +249,8 @@ def test_internal_endpoint_hides_personal_data() -> None:
     assert "telefono" not in response.text
 
 
-def test_internal_user_status_distinguishes_inactive_and_missing() -> None:
+def test_internal_user_status_distinguishes_inactive_and_missing(client: TestClient) -> None:
     reset_db()
-    set_service_credentials()
     payload = {
         "nombre": "Sofia",
         "apellido": "Diaz",
@@ -268,19 +295,62 @@ def test_fastapi_lifespan_starts_and_stops() -> None:
     assert response.status_code == 200
 
 
+def test_internal_api_key_fingerprint_must_be_valid() -> None:
+    from app.config import settings
+
+    settings.internal_service_credentials = (
+        '{"pagos":{"key_hashes":["test-key-hash"],"permissions":["users:read_status"],"enabled":true}}'
+    )
+    with pytest.raises(RuntimeError, match="huella de API Key invalida"):
+        _load_internal_consumers()
+
+
+def test_internal_consumer_json_must_be_valid() -> None:
+    from app.config import settings
+
+    settings.internal_service_credentials = "{invalid-json"
+    with pytest.raises(RuntimeError, match="JSON valido"):
+        _load_internal_consumers()
+
+
+def test_internal_consumer_configuration_must_be_complete() -> None:
+    from app.config import settings
+
+    settings.internal_service_credentials = '{"pagos":{"key_hashes":[],"permissions":[],"enabled":true}}'
+    with pytest.raises(RuntimeError, match="al menos una huella"):
+        _load_internal_consumers()
+
+
+@pytest.mark.parametrize(
+    ("credentials", "message"),
+    [
+        (
+            '{"pagos":{"key_hashes":["test-key-hash"],"permissions":["users:read_status"],"enabled":true}}',
+            "huella de API Key invalida",
+        ),
+        ("{invalid-json", "JSON valido"),
+        ('{"pagos":{"key_hashes":[],"permissions":[],"enabled":true}}', "al menos una huella"),
+    ],
+)
+def test_invalid_internal_credentials_prevent_application_startup(
+    monkeypatch: pytest.MonkeyPatch, credentials: str, message: str
+) -> None:
+    monkeypatch.setattr(settings, "internal_service_credentials", credentials)
+    with pytest.raises(RuntimeError, match=message):
+        with TestClient(app):
+            pass
+
+
 def test_production_rejects_sqlite() -> None:
     candidate = Settings(
         _env_file=None,
         database_url="sqlite:///./insecure.db",
         jwt_secret_key="secure-test-secret",
-        internal_service_credentials='{"pagos":{"key_hashes":["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],"permissions":["users:read_status"],"enabled":true}}',
+        internal_service_credentials=TEST_SERVICE_CREDENTIALS,
         app_env="production",
     )
-    try:
+    with pytest.raises(RuntimeError, match="SQLite"):
         validate_settings(candidate)
-        assert False, "La configuración debería rechazarse"
-    except RuntimeError as exc:
-        assert "SQLite" in str(exc)
 
 
 def test_production_rejects_default_jwt_secret() -> None:
@@ -288,11 +358,8 @@ def test_production_rejects_default_jwt_secret() -> None:
         _env_file=None,
         database_url="mysql+pymysql://app:secret@mariadb:3306/app_pagos_usuarios",
         jwt_secret_key="change-this-secret-key",
-        internal_service_credentials='{"pagos":{"key_hashes":["0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"],"permissions":["users:read_status"],"enabled":true}}',
+        internal_service_credentials=TEST_SERVICE_CREDENTIALS,
         app_env="production",
     )
-    try:
+    with pytest.raises(RuntimeError, match="JWT_SECRET_KEY"):
         validate_settings(candidate)
-        assert False, "La configuración debería rechazarse"
-    except RuntimeError as exc:
-        assert "JWT_SECRET_KEY" in str(exc)

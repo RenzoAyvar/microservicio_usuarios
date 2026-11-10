@@ -15,11 +15,11 @@ Tecnologías existentes:
 
 El repositorio ya dispone de Dockerfile, docker-compose.yml y nginx.conf.
 
-## 2. Objetivo
+## 2. Entorno implementado
 
-Desplegar el microservicio utilizando Kubernetes en un clúster de un solo nodo.
-
-El entorno objetivo es AWS EC2 con Amazon Linux 2023. Se administrará Kubernetes mediante kubectl desde Windows 10.
+El microservicio se despliega en Amazon EKS `usuarios-eks`, región
+`us-east-1`, namespace `app-pagos`. Se administra mediante `kubectl`; la
+documentación operativa incluye instrucciones para Windows 10 CMD y PowerShell.
 
 ## 3. Componentes Kubernetes
 
@@ -30,27 +30,33 @@ Definir los siguientes recursos en el namespace `app-pagos`:
 3. Service ClusterIP para FastAPI.
 4. StatefulSet para MariaDB.
 5. Service ClusterIP para MariaDB.
-6. PersistentVolumeClaim para conservar los datos.
+6. PVC de 10 GiB para conservar los datos de MariaDB.
 7. Secret para contraseñas y JWT_SECRET_KEY.
 8. ConfigMap para configuraciones no sensibles.
 9. Deployment para Nginx.
 10. Service ClusterIP para Nginx.
 
-La arquitectura de EKS utiliza el gateway centralizado de App Pagos. Este
+MariaDB se ejecuta como StatefulSet y utiliza un PVC `ReadWriteOnce` con
+StorageClass `gp3`, cifrado EBS y AWS EBS CSI Driver. El StorageClass conserva
+`reclaimPolicy: Delete`. FastAPI parte con una sola réplica porque
+`FAILED_LOGINS` reside en memoria. Nginx actúa como gateway interno.
+
+La arquitectura utiliza el gateway centralizado de App Pagos. Este
 microservicio no se publica directamente ni incorpora frontend. Los Services
-`users-api` y `users-gateway` son `ClusterIP`; la comunicación interna usa
-`users-api:8000`.
+`users-api` y `users-gateway` son `ClusterIP`; los consumidores internos llaman
+`http://users-api.app-pagos.svc.cluster.local:8000`. No se usan NodePort ni
+LoadBalancer.
 
 ## 4. Requisitos técnicos
 
 - Utilizar la imagen MariaDB 11.8.9.
-- Construir una imagen Docker del backend.
-- Publicar la imagen en un registro accesible desde EC2.
+- Construir y publicar la imagen del backend en ECR con una etiqueta basada
+  en el SHA del commit.
 - No almacenar contraseñas ni secretos en los manifiestos.
 - No exponer MariaDB públicamente.
-- Configurar correctamente DATABASE_URL para utilizar el nombre del Service de MariaDB.
-- Configurar readinessProbe y livenessProbe en FastAPI.
-- Comprobar la disponibilidad de MariaDB antes de iniciar operaciones que requieran conexión.
+- Configurar `DATABASE_URL` con el Service `mariadb` dentro de `app-pagos`.
+- La readiness de FastAPI consulta la base de datos; la liveness verifica el
+  proceso sin depender de MariaDB.
 - Configurar almacenamiento persistente para MariaDB.
 - Evitar ejecutar contenedores como root cuando sea viable.
 - Mantener las rutas y endpoints existentes del microservicio.
@@ -72,104 +78,27 @@ No reescribir el microservicio.
 No cambiar las operaciones existentes.
 No introducir frontend React si todavía no existe en el repositorio.
 No utilizar contraseñas de ejemplo como credenciales reales.
-No asumir que el clúster tiene un Ingress Controller instalado.
+No asumir que el clúster tiene un Ingress Controller instalado. No crear
+Services `NodePort` o `LoadBalancer` ni exponer directamente FastAPI o MariaDB.
+La publicación HTTPS corresponde a la infraestructura central.
 
-Antes de implementar, analiza el código actual y verifica qué ajustes son realmente necesarios. Documenta cualquier incompatibilidad encontrada.
+El diseño desplegado mantiene los recursos anteriores internos al clúster. La
+publicación pública HTTPS, el nombre de dominio, el certificado y la conexión
+con el gateway centralizado pertenecen a la infraestructura central; no se
+configuran en este microservicio.
 
-7. Análisis previo obligatorio
+## 7. Estado de compatibilidad
 
-Antes de implementar:
-
-Analizar el repositorio y su estructura.
-
-Revisar Dockerfile, docker-compose.yml y nginx.conf.
-
-Identificar las variables de entorno utilizadas por FastAPI.
-
-Verificar la conexión SQLAlchemy con MariaDB.
-
-Identificar cómo se inicializan las tablas.
-
-Verificar si existe un endpoint de salud para las probes.
-
-Comprobar la compatibilidad de las imágenes con la arquitectura de EC2.
-
-Identificar incompatibilidades entre Docker Compose y Kubernetes.
-
-No realizar cambios hasta presentar un diagnóstico de compatibilidad.
-
-El diagnóstico debe indicar:
-
-Archivos compatibles.
-
-Archivos que necesitan ajustes.
-
-Variables de entorno necesarias.
-
-Dependencias de infraestructura.
-
-Riesgos de seguridad.
-
-Cambios mínimos requeridos.
-
-Después del diagnóstico, implementar únicamente los cambios necesarios para cumplir este SPEC.
-
-## 8. Acceso público y consumo externo de la API
-
-### 8.1. Objetivo
-
-Permitir que aplicaciones y usuarios externos puedan consumir los endpoints del microservicio de usuarios a través de Internet.
-
-Los consumidores podrán ser:
-
-- Aplicaciones web.
-- Aplicaciones móviles.
-- Otros microservicios.
-- Clientes HTTP como Postman.
-- Sistemas externos autorizados.
-
-### 8.2. Exposición de la API
-
-- Nginx será el único punto de entrada público.
-- FastAPI permanecerá expuesto únicamente mediante un Service ClusterIP.
-- MariaDB permanecerá dentro de la red interna del clúster.
-- Usar un Service ClusterIP para el gateway central.
-- Permitir el tráfico correspondiente en el Security Group de EC2.
-- Documentar la URL pública de acceso a la API.
-
-### 8.3. Comunicación segura
-
-- Configurar HTTPS mediante un certificado TLS válido.
-- Evitar transmitir credenciales y tokens mediante HTTP sin cifrado.
-- Configurar Nginx para redirigir HTTP a HTTPS cuando HTTPS esté habilitado.
-- Mantener JWT para autenticar las solicitudes protegidas.
-- Configurar los encabezados necesarios para el funcionamiento del proxy.
-
-### 8.4. Consumo de la API
-
-- Mantener los endpoints existentes.
-- Permitir que clientes externos realicen solicitudes HTTP a los endpoints publicados.
-- Documentar los métodos HTTP, rutas, parámetros, cuerpos de solicitud y respuestas.
-- Proporcionar ejemplos de consumo mediante curl y Postman.
-- Documentar el mecanismo de autenticación JWT.
-- Mantener disponible la documentación OpenAPI de FastAPI, según la política de acceso definida.
-
-### 8.5. Seguridad del acceso público
-
-- No exponer directamente FastAPI ni MariaDB.
-- No permitir acceso público al puerto 3306.
-- No publicar secretos ni credenciales.
-- Configurar CORS únicamente para los orígenes que realmente necesiten acceder desde navegadores.
-- No considerar CORS como mecanismo de autenticación.
-- Configurar límites de solicitudes en Nginx cuando sea viable.
-- Evitar que los endpoints protegidos puedan utilizarse sin autenticación.
-- Documentar qué endpoints son públicos y cuáles requieren JWT.
-
-### 8.6. Pruebas de acceso externo
-
-- Consumir la API desde una máquina distinta a la instancia EC2.
-- Comprobar los endpoints mediante Postman y curl.
-- Verificar el registro y autenticación de usuarios.
-- Verificar el acceso a endpoints protegidos utilizando JWT.
-- Comprobar que MariaDB y FastAPI no sean accesibles directamente desde Internet.
-- Verificar el funcionamiento mediante HTTPS.
+- Los manifiestos usan el namespace `app-pagos`; los Services de FastAPI,
+  MariaDB y Nginx son `ClusterIP`.
+- MariaDB es un StatefulSet con PVC de 10 GiB, `ReadWriteOnce`, StorageClass
+  `gp3`, cifrado EBS y AWS EBS CSI Driver.
+- El StorageClass tiene `reclaimPolicy: Delete`. Eliminar el StatefulSet no
+  elimina necesariamente los PVC creados por `volumeClaimTemplates`.
+- FastAPI utiliza readiness `/api/ready`, liveness `/api/live` y una réplica.
+- Nginx bloquea `/internal` y `/internal/`; los consumidores autorizados llaman
+  directamente al Service DNS `users-api`.
+- Antes de escalar FastAPI, el contador `FAILED_LOGINS` en memoria debe
+  trasladarse a almacenamiento compartido y persistente.
+- Tras eliminar recursos, verificar por separado volúmenes EBS y otros recursos
+  AWS residuales; eliminar el clúster no garantiza su eliminación.

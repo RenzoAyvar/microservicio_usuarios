@@ -1,235 +1,327 @@
-# Kubernetes - Microservicio de Usuarios
+# Despliegue controlado en Amazon EKS
 
-## Diagnostico previo
+Esta guía es para el clúster `usuarios-eks`, región `us-east-1` y namespace
+`app-pagos`. Los Services `users-api`, `users-gateway` y `mariadb` son
+internos. No hay publicación directa de FastAPI ni MariaDB; la publicación
+HTTPS es responsabilidad de la infraestructura central.
 
-- Compatible: Dockerfile usa Uvicorn con `app.main:app`; compose y Nginx muestran los nombres y puertos reales.
-- Compatible: SQLAlchemy crea las tablas al iniciar FastAPI mediante `Base.metadata.create_all`.
-- Compatible: el endpoint de salud es `GET /api/health`.
-- Compatible: MariaDB usa el puerto interno 3306.
-- Ajuste requerido: el almacenamiento de intentos fallidos está en memoria (`FAILED_LOGINS`) y por eso FastAPI debe ejecutarse con una sola réplica.
-- Ajuste requerido: Docker Compose usa el host `mariadb`; Kubernetes usa el Service DNS `mariadb`.
-- Seguridad: los manifiestos no contienen credenciales. Se crean fuera del repositorio mediante `kubectl`.
-- Seguridad: JWT y API Keys entre servicios permanecen separados. Las API Keys se configuran como huellas SHA-256 en `INTERNAL_SERVICE_CREDENTIALS`.
+No ejecutar estas instrucciones durante una revisión local del repositorio.
+Los comandos de esta guía son para una futura operación autorizada.
 
-## Recursos
+## CORS
 
-- Namespace: `app-pagos`
-- Base de datos: `mariadb`, persistencia gp3 de 10 GiB
-- Backend: `users-api`, ClusterIP en el puerto 8000
-- Gateway: `users-gateway`, ClusterIP en el puerto 80
+`CORS_ORIGINS` en `configmap.yaml` contiene `http://localhost:3000` únicamente
+como ejemplo local; no es un dominio de producción. Antes de desplegar,
+sustituirlo por el origen real del frontend centralizado, incluyendo esquema y
+puerto cuando corresponda. CORS controla qué orígenes de navegador pueden
+leer respuestas; no autentica clientes. Si el gateway central sirve frontend
+y API bajo el mismo origen, normalmente no se requiere habilitar CORS
+adicional. No se presupone ni se inventa el dominio del frontend.
 
-`users-api` y MariaDB no se publican. El Gateway no publica `/internal/`. Para publicar el gateway fuera del cluster, se requiere una decisión posterior: Ingress HTTPS o un Service administrado por AWS; ninguno se incluye aquí.
+## Fase 1: verificaciones previas
 
-## Requisitos
+Ejecutar en **CMD** desde una sesión autenticada. No continuar si la cuenta,
+región, contexto o recursos no corresponden al entorno previsto.
 
-- EKS con el CSI driver de EBS habilitado.
-- Driver de red y acceso a imágenes oficiales configurados.
-- El `StorageClass gp3` usa `ebs.csi.aws.com`, por lo que requiere el CSI addon de AWS para EBS.
-
-La región configurada es `us-east-1`. Si la arquitectura de la instancia exige otra imagen de plataforma, construye y publica una imagen compatible con el nodo.
-
-## Variables de configuracion
-
-No sensibles:
-
-- `JWT_ALGORITHM`
-- `ACCESS_TOKEN_EXPIRE_HOURS`
-- `CORS_ORIGINS`
-
-Sensibles:
-
-- `DATABASE_URL`
-- `JWT_SECRET_KEY`
-- `INTERNAL_SERVICE_CREDENTIALS`
-- `MARIADB_PASSWORD`
-- `MARIADB_ROOT_PASSWORD`
-
-Ejemplos de valores reales se mantienen fuera de los YAML. Genera secretos mediante variables locales, sin escribirlos en un archivo:
-
-```powershell
-$MARIADB_PASSWORD = Read-Host -MaskInput "MariaDB application password"
-$MARIADB_ROOT_PASSWORD = Read-Host -MaskInput "MariaDB root password"
-$JWT_SECRET_KEY = Read-Host -MaskInput "JWT secret"
-
-# La URL debe usar el Service DNS del cluster, no localhost.
-$DATABASE_URL = "mysql+pymysql://appuser:$MARIADB_PASSWORD@mariadb:3306/app_pagos_usuarios"
-
-# INTERNAL_SERVICE_CREDENTIALS debe ser JSON y contener huellas SHA-256 de API Keys.
-$INTERNAL_SERVICE_CREDENTIALS = Read-Host -Prompt "Internal consumers JSON"
-
-kubectl create namespace app-pagos --dry-run=client -o yaml | kubectl apply -f -
-
-kubectl -n app-pagos create secret generic users-secrets `
-  --from-literal=MARIADB_PASSWORD="$MARIADB_PASSWORD" `
-  --from-literal=MARIADB_ROOT_PASSWORD="$MARIADB_ROOT_PASSWORD" `
-  --from-literal=DATABASE_URL="$DATABASE_URL" `
-  --from-literal=JWT_SECRET_KEY="$JWT_SECRET_KEY" `
-  --from-literal=INTERNAL_SERVICE_CREDENTIALS="$INTERNAL_SERVICE_CREDENTIALS" `
-  --dry-run=client -o yaml | kubectl apply -f -
+```cmd
+set AWS_REGION=us-east-1
+aws sts get-caller-identity --region %AWS_REGION%
+aws configure get region
+aws eks describe-cluster --name usuarios-eks --region %AWS_REGION% --query cluster.status --output text
+kubectl config current-context
+kubectl get nodes -o wide
+aws eks describe-addon --cluster-name usuarios-eks --addon-name aws-ebs-csi-driver --region %AWS_REGION% --query addon.status --output text
+kubectl get storageclass gp3 -o yaml
 ```
 
-Para generar una huella de API Key:
+Confirmar identidad y contexto esperados, región `us-east-1`, clúster con
+estado `ACTIVE`, al menos un nodo `Ready`, addon EBS CSI `ACTIVE` y
+StorageClass `gp3` con provisionador `ebs.csi.aws.com`, tipo `gp3`, cifrado y
+`reclaimPolicy: Delete`. Si el addon o la clase no existen, detenerse y
+resolverlo con el responsable de infraestructura.
 
-```powershell
-$apiKey = Read-Host -MaskInput "API Key"
-[Convert]::ToHexString([Security.Cryptography.SHA256.HashData([Text.Encoding]::UTF8.GetBytes("$apiKey"))).ToLowerInvariant()
+## Fase 2: preparar y publicar la imagen
+
+Los siguientes comandos son para **CMD**, desde la raíz del repositorio.
+`IMAGE_TAG` usa el SHA completo del commit; la imagen debe existir en ECR antes
+de continuar. Si el repositorio ECR no existe, crearlo explícitamente con
+`aws ecr create-repository`; no ignorar errores de permisos o conectividad.
+
+```cmd
+set AWS_REGION=us-east-1
+for /f %i in ('aws sts get-caller-identity --query Account --output text') do set AWS_ACCOUNT_ID=%i
+set ECR_REPOSITORY=microservicio-usuarios
+set ECR_REGISTRY=%AWS_ACCOUNT_ID%.dkr.ecr.%AWS_REGION%.amazonaws.com
+for /f %i in ('git rev-parse HEAD') do set IMAGE_TAG=%i
+set IMAGE_URI=%ECR_REGISTRY%/%ECR_REPOSITORY%:%IMAGE_TAG%
+
+aws ecr describe-repositories --repository-names %ECR_REPOSITORY% --region %AWS_REGION%
 ```
 
-Ejemplo de estructura JSON, sustituyendo la huella calculada:
+Si `describe-repositories` confirma que el repositorio no existe, crearlo:
 
-```json
-{
-  "pagos-service": {
-    "key_hashes": ["HUELLA_SHA256"],
-    "permissions": ["users:read_status"],
-    "enabled": true
-  }
-}
+```cmd
+aws ecr create-repository --repository-name %ECR_REPOSITORY% --region %AWS_REGION%
 ```
 
-## Construir y publicar la imagen en ECR
+Construir, iniciar sesión y publicar:
 
-Desde la raíz del repositorio:
-
-```powershell
-$AWS_REGION = "us-east-1"
-$AWS_ACCOUNT_ID = aws sts get-caller-identity --query Account --output text
-$ECR_REPOSITORY = "microservicio-usuarios"
-$IMAGE_TAG = git rev-parse --short HEAD
-$ECR_URI = "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY"
-
-aws ecr describe-repositories --repository-names $ECR_REPOSITORY --region $AWS_REGION 2>$null
-if ($LASTEXITCODE -ne 0) {
-  aws ecr create-repository --repository-name $ECR_REPOSITORY --region $AWS_REGION
-}
-
-aws ecr get-login-password --region $AWS_REGION |
-  docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
-
-docker build -t "$ECR_URI:$IMAGE_TAG" .
-docker push "$ECR_URI:$IMAGE_TAG"
+```cmd
+docker build -t microservicio-usuarios:%IMAGE_TAG% .
+docker tag microservicio-usuarios:%IMAGE_TAG% %IMAGE_URI%
+aws ecr get-login-password --region %AWS_REGION% | docker login --username AWS --password-stdin %ECR_REGISTRY%
+docker push %IMAGE_URI%
+aws ecr describe-images --repository-name %ECR_REPOSITORY% --image-ids imageTag=%IMAGE_TAG% --region %AWS_REGION%
 ```
 
-Actualiza el Deployment con la imagen publicada antes de aplicar:
+La autenticación pasa por una tubería; no copiar ni imprimir el token de ECR.
+No se publica una imagen con etiqueta mutable ni con una imagen de ejemplo.
 
-```powershell
-$IMAGE = "$ECR_URI:$IMAGE_TAG"
-(Get-Content k8s/fastapi.yaml) -replace "REPLACE_WITH_ECR_IMAGE_URI", $IMAGE |
-  Set-Content k8s/fastapi.rendered.yaml
-kubectl apply -f k8s/fastapi.rendered.yaml
-```
+## Fase 3: preparar Kubernetes
 
-No publiques `fastapi.rendered.yaml` si puede contener datos sensibles por extensión posterior; la imagen no contiene credenciales.
+Los comandos de aplicación son intencionalmente individuales. Desde **CMD**,
+crear el namespace solo si aún no existe y aplicar la configuración:
 
-## Aplicar los manifiestos
-
-Aplica primero el namespace, almacenamiento, configuración, base de datos y backend/gateway:
-
-```powershell
-kubectl apply -f k8s/namespace.yaml
-kubectl apply -f k8s/storageclass-gp3.yaml
+```cmd
+kubectl get namespace app-pagos >nul 2>&1 || kubectl create namespace app-pagos
+kubectl get storageclass gp3 -o yaml
 kubectl apply -f k8s/configmap.yaml
-kubectl apply -f k8s/secret.yaml
-
-# Reemplaza el Secret vacío por uno creado con kubectl, como se indicó arriba.
-kubectl apply -f k8s/mariadb.yaml
-kubectl apply -f k8s/fastapi.yaml
-kubectl apply -f k8s/nginx.yaml
 ```
 
-O aplica todos los recursos y reemplaza después la imagen:
+Aplicar `storageclass-gp3.yaml` únicamente si `gp3` no existe y el responsable
+confirma que es la configuración esperada:
+
+```cmd
+kubectl apply -f k8s/storageclass-gp3.yaml
+```
+
+Si ya existe, comprobar sus parámetros; no reemplazar una clase en uso.
+
+### Crear o actualizar el Secret (PowerShell)
+
+**Cambiar explícitamente de CMD a PowerShell** para este paso. No ejecutar el
+manifiesto vacío [secret.yaml](secret.yaml): es solo una plantilla de
+referencia. El Secret real `users-secrets` debe contener exactamente
+`DATABASE_URL`, `JWT_SECRET_KEY`, `INTERNAL_SERVICE_CREDENTIALS`,
+`MARIADB_PASSWORD` y `MARIADB_ROOT_PASSWORD`.
+
+El siguiente ejemplo oculta la captura de credenciales, calcula la huella de
+la API Key en memoria y usa un directorio temporal con permisos del usuario
+actual para evitar pasar credenciales como argumentos de proceso. Los archivos
+temporales se eliminan al terminar; no se imprimen ni se guardan en el
+repositorio. PowerShell no reinterpreta `$`, `!`, `\` ni comillas dentro de los
+valores capturados. La contraseña se codifica para la URL SQLAlchemy. No
+escribir credenciales como literales en el script ni en el historial:
 
 ```powershell
-kubectl apply -f k8s/
-kubectl set image deployment/users-api users-api="$IMAGE" -n app-pagos
+function ConvertFrom-SecureInput {
+    param([Security.SecureString]$Value)
+    $pointer = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Value)
+    try {
+        [Runtime.InteropServices.Marshal]::PtrToStringBSTR($pointer)
+    }
+    finally {
+        [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($pointer)
+    }
+}
+
+$MARIADB_PASSWORD = ConvertFrom-SecureInput (Read-Host -AsSecureString "MariaDB application password")
+$MARIADB_ROOT_PASSWORD = ConvertFrom-SecureInput (Read-Host -AsSecureString "MariaDB root password")
+$JWT_SECRET_KEY = ConvertFrom-SecureInput (Read-Host -AsSecureString "JWT signing secret")
+$apiKey = ConvertFrom-SecureInput (Read-Host -AsSecureString "API Key for pagos-service")
+
+foreach ($value in @($MARIADB_PASSWORD, $MARIADB_ROOT_PASSWORD, $JWT_SECRET_KEY, $apiKey)) {
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        throw "No se puede crear el Secret: todos los valores son obligatorios."
+    }
+}
+
+$sha256 = [Security.Cryptography.SHA256]::Create()
+try {
+    $keyHash = [BitConverter]::ToString(
+        $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($apiKey))
+    ).Replace("-", "").ToLowerInvariant()
+}
+finally {
+    $sha256.Dispose()
+}
+
+$INTERNAL_SERVICE_CREDENTIALS = @{
+    "pagos-service" = @{
+        key_hashes = @($keyHash)
+        permissions = @("users:read_status")
+        enabled = $true
+    }
+} | ConvertTo-Json -Depth 5 -Compress
+
+$encodedPassword = [Uri]::EscapeDataString($MARIADB_PASSWORD)
+$DATABASE_URL = "mysql+pymysql://appuser:${encodedPassword}@mariadb:3306/app_pagos_usuarios"
+
+$secretValues = @{
+    DATABASE_URL = $DATABASE_URL
+    JWT_SECRET_KEY = $JWT_SECRET_KEY
+    INTERNAL_SERVICE_CREDENTIALS = $INTERNAL_SERVICE_CREDENTIALS
+    MARIADB_PASSWORD = $MARIADB_PASSWORD
+    MARIADB_ROOT_PASSWORD = $MARIADB_ROOT_PASSWORD
+}
+if ($secretValues.Count -ne 5 -or @($secretValues.Values | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -ne 0) {
+    throw "El Secret debe contener las cinco claves requeridas con valores no vacíos."
+}
+
+$tempDir = Join-Path $env:TEMP ("users-secrets-" + [Guid]::NewGuid().ToString("N"))
+try {
+    New-Item -ItemType Directory -Path $tempDir | Out-Null
+    $acl = Get-Acl -Path $tempDir
+    $acl.SetAccessRuleProtection($true, $false)
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $rule = New-Object Security.AccessControl.FileSystemAccessRule(
+        $identity, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
+    )
+    $acl.SetAccessRule($rule)
+    Set-Acl -Path $tempDir -AclObject $acl
+
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    foreach ($key in $secretValues.Keys) {
+        $path = Join-Path $tempDir $key
+        [IO.File]::WriteAllText($path, [string]$secretValues[$key], $utf8NoBom)
+    }
+
+    $secretArgs = @(
+        "create", "secret", "generic", "users-secrets",
+        "--namespace=app-pagos",
+        "--from-file=DATABASE_URL=$(Join-Path $tempDir 'DATABASE_URL')",
+        "--from-file=JWT_SECRET_KEY=$(Join-Path $tempDir 'JWT_SECRET_KEY')",
+        "--from-file=INTERNAL_SERVICE_CREDENTIALS=$(Join-Path $tempDir 'INTERNAL_SERVICE_CREDENTIALS')",
+        "--from-file=MARIADB_PASSWORD=$(Join-Path $tempDir 'MARIADB_PASSWORD')",
+        "--from-file=MARIADB_ROOT_PASSWORD=$(Join-Path $tempDir 'MARIADB_ROOT_PASSWORD')",
+        "--dry-run=client", "-o", "yaml"
+    )
+    $secretManifest = & kubectl @secretArgs
+    if ($LASTEXITCODE -ne 0) {
+        throw "kubectl no pudo generar users-secrets; no continuar con el despliegue."
+    }
+    $secretManifest | kubectl apply -f -
+    if ($LASTEXITCODE -ne 0) {
+        throw "kubectl no pudo crear o actualizar users-secrets."
+    }
+}
+finally {
+    if (Test-Path -LiteralPath $tempDir) {
+        Remove-Item -LiteralPath $tempDir -Recurse -Force
+    }
+    Remove-Variable apiKey, keyHash, secretArgs, secretManifest, secretValues, INTERNAL_SERVICE_CREDENTIALS, DATABASE_URL, encodedPassword, MARIADB_PASSWORD, MARIADB_ROOT_PASSWORD, JWT_SECRET_KEY -ErrorAction SilentlyContinue
+}
 ```
 
-## Verificacion
+El comando muestra solo el estado de creación/actualización. No continuar si
+el bloque anterior falla. Las cinco claves se escriben solo en archivos
+temporales protegidos y el bloque los elimina en `finally`, incluso si `kubectl`
+falla. Revisar los nombres de claves sin mostrar valores:
 
 ```powershell
-kubectl get pods,svc,pvc -n app-pagos
-kubectl get storageclass gp3
-kubectl rollout status deployment/users-api -n app-pagos
-kubectl rollout status deployment/users-gateway -n app-pagos
-kubectl rollout status statefulset/mariadb -n app-pagos
-kubectl get endpoints -n app-pagos
-kubectl logs deployment/users-api -n app-pagos
-kubectl logs statefulset/mariadb -n app-pagos
+kubectl describe secret users-secrets -n app-pagos
 ```
 
-Como los Services son internos, realiza pruebas mediante port-forward:
+No crear el Secret pasando valores vacíos, no aplicar una plantilla vacía y
+nunca guardar credenciales reales en Git. La entrada de ejemplo crea un solo
+consumidor; añadir las huellas SHA-256 y permisos reales de cada consumidor
+autorizado antes de desplegar.
+
+## Fase 4: desplegar en orden
+
+Continuar desde **CMD** solo cuando la imagen real esté verificada en ECR,
+`users-secrets` contenga las cinco claves y el ConfigMap tenga el origen CORS
+correcto.
+
+1. Aplicar MariaDB y esperar el StatefulSet y PVC:
+
+   ```cmd
+   kubectl apply -f k8s/mariadb.yaml
+   kubectl wait --for=jsonpath={.status.phase}=Bound pvc/mariadb-data-mariadb-0 -n app-pagos --timeout=10m
+   kubectl rollout status statefulset/mariadb -n app-pagos --timeout=10m
+   ```
+
+2. Generar localmente el manifiesto FastAPI con la imagen ECR publicada. Abrir
+   **PowerShell**; `fastapi.rendered.yaml` está ignorado por Git y no contiene
+   credenciales:
+
+   ```powershell
+   $AWS_REGION = "us-east-1"
+   $AWS_ACCOUNT_ID = (aws sts get-caller-identity --query Account --output text).Trim()
+   $IMAGE_TAG = (git rev-parse HEAD).Trim()
+   if ($LASTEXITCODE -ne 0 -or $IMAGE_TAG -notmatch '^[0-9a-f]{40}$') {
+       throw "Se requiere un SHA completo de commit para etiquetar la imagen."
+   }
+   $ECR_IMAGE_URI = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/microservicio-usuarios:${IMAGE_TAG}"
+   if ($ECR_IMAGE_URI -notmatch '^\d{12}\.dkr\.ecr\.us-east-1\.amazonaws\.com/microservicio-usuarios:[0-9a-f]{40}$') {
+       throw "La imagen debe ser una URI de ECR de us-east-1 etiquetada con el SHA."
+   }
+   aws ecr describe-images --repository-name microservicio-usuarios --image-ids "imageTag=$IMAGE_TAG" --region $AWS_REGION
+   if ($LASTEXITCODE -ne 0) {
+       throw "La imagen no está publicada en ECR; no generar ni aplicar el Deployment."
+   }
+
+   $template = Get-Content k8s\fastapi.yaml -Raw
+   $placeholder = "REPLACE_WITH_ECR_IMAGE_URI"
+   if (-not $template.Contains($placeholder)) {
+       throw "No se encontró el marcador de imagen esperado en la plantilla."
+   }
+   $rendered = $template.Replace($placeholder, $ECR_IMAGE_URI)
+   if ($rendered.Contains($placeholder)) {
+       throw "La imagen conserva el marcador placeholder; no aplicar."
+   }
+   Set-Content -Path k8s\fastapi.rendered.yaml -Value $rendered -Encoding utf8
+   ```
+
+   Volver a **CMD** y aplicar únicamente el archivo renderizado:
+
+   ```cmd
+   findstr /C:"REPLACE_WITH_ECR_IMAGE_URI" k8s\fastapi.rendered.yaml
+   ```
+
+   Si `findstr` encuentra el marcador, detenerse. Si no lo encuentra:
+
+   ```cmd
+   kubectl apply -f k8s\fastapi.rendered.yaml
+   kubectl rollout status deployment/users-api -n app-pagos --timeout=10m
+   ```
+
+3. Aplicar Nginx y esperar al gateway:
+
+   ```cmd
+   kubectl apply -f k8s/nginx.yaml
+   kubectl rollout status deployment/users-gateway -n app-pagos --timeout=10m
+   ```
+
+4. Verificar los recursos y disponibilidad:
+
+   ```cmd
+   kubectl get pods,services,pvc -n app-pagos
+   kubectl get services -n app-pagos -o wide
+   kubectl get endpoints -n app-pagos
+   kubectl describe secret users-secrets -n app-pagos
+   ```
+
+   Confirmar pods `Ready`, PVC `Bound`, y que los Services continúan siendo
+   `ClusterIP`. El DNS interno de FastAPI es
+   `http://users-api.app-pagos.svc.cluster.local:8000`.
+
+Al finalizar, eliminar solo el archivo local renderizado:
 
 ```powershell
-kubectl port-forward -n app-pagos service/users-gateway 8080:80
+Remove-Item k8s\fastapi.rendered.yaml
 ```
 
-FastAPI queda disponible en `http://127.0.0.1:8080`.
+## Persistencia y escalado
 
-## Pruebas funcionales
+El PVC creado por `volumeClaimTemplates` puede permanecer después de eliminar
+el StatefulSet. El StorageClass `gp3` usa cifrado EBS y `reclaimPolicy: Delete`,
+pero la eliminación del clúster no garantiza que desaparezcan todos los
+recursos AWS. Verificar volúmenes EBS y otros recursos residuales con el
+responsable de infraestructura.
 
-Los JSON siguientes usan valores de prueba locales. Sustituye el correo y la contraseña.
+Mantener una réplica de FastAPI mientras `FAILED_LOGINS` siga en memoria. Antes
+de escalar, migrar el contador a almacenamiento compartido y persistente.
 
-Registro:
-
-```powershell
-curl.exe -X POST http://127.0.0.1:8080/api/auth/register `
-  -H "Content-Type: application/json" `
-  -d '{\"nombre\":\"Ana\",\"apellido\":\"Perez\",\"email\":\"ana@example.com\",\"password\":\"Clave123!\",\"telefono\":\"999999999\",\"direccion\":\"Lima\",\"fecha_nacimiento\":\"1990-01-01\"}'
-```
-
-Login:
-
-```powershell
-$login = curl.exe -X POST http://127.0.0.1:8080/api/auth/login `
-  -H "Content-Type: application/json" `
-  -d '{\"email\":\"ana@example.com\",\"password\":\"Clave123!\"}'
-$login | ConvertFrom-Json
-$TOKEN = ($login | ConvertFrom-Json).access_token
-```
-
-Perfil:
-
-```powershell
-curl.exe http://127.0.0.1:8080/api/users/me `
-  -H "Authorization: Bearer $TOKEN"
-```
-
-Consulta interna válida e inválida. La consulta directa debe hacerse mediante acceso interno al backend o mediante port-forward de FastAPI; el gateway debe devolver 404.
-
-```powershell
-# El gateway no debe publicar la ruta interna.
-curl.exe -i http://127.0.0.1:8080/internal/users/1
-
-# Iniciar otro port-forward durante las pruebas internas.
-kubectl port-forward -n app-pagos service/users-api 8000:8000
-
-curl.exe -i http://127.0.0.1:8000/internal/users/1 `
-  -H "X-API-Key: $VALID_API_KEY"
-
-curl.exe -i http://127.0.0.1:8000/internal/users/1 `
-  -H "X-API-Key: api-key-invalida"
-```
-
-La clave válida debe ser la clave original cuya huella esté configurada. Nunca publiques la clave real en repositorios, comandos históricos o YAML.
-
-## Persistencia
-
-Comprueba que MariaDB conserva los datos:
-
-```powershell
-kubectl delete pod mariadb-0 -n app-pagos
-kubectl rollout status statefulset/mariadb -n app-pagos
-kubectl port-forward -n app-pagos service/users-gateway 8080:80
-```
-
-Después inicia sesión o consulta el perfil nuevamente.
-
-## Relacion con Spec_usuarios_2.md
-
-- Se mantiene la separación JWT/API Key definida por el spec.
-- Se mantienen los endpoints reales registrados en el código.
-- Se implementa la ruta interna sin publicación en Nginx.
-- Se mantiene una réplica de FastAPI por la limitación de intentos fallidos en memoria; el spec exige consistencia si hay varias réplicas.
-- Docker Compose no se modifica: sus credenciales de desarrollo siguen siendo específicas de desarrollo y no se reutilizan en Kubernetes.
-- Se añade producción Kubernetes sobre los recursos existentes sin cambiar la lógica funcional.
-- La exposición HTTPS pública queda fuera de los manifiestos, para evitar asumir un Ingress Controller o un método de publicación.
+Los consumidores internos usan API Keys por `X-API-Key` y llaman directamente
+al DNS de `users-api`; Nginx devuelve 404 para `/internal` y `/internal/`.

@@ -48,6 +48,16 @@ La consulta interna requiere el permiso `users:read_status`. Las API Keys reales
 no deben incluirse en el repositorio ni en esta configuración; solo deben
 registrarse sus huellas SHA-256.
 
+En Kubernetes, los consumidores autorizados llaman directamente al backend por
+`http://users-api.app-pagos.svc.cluster.local:8000`. El gateway Nginx bloquea
+`/internal` y `/internal/`.
+
+`CORS_ORIGINS` debe contener los orígenes reales desde los que un navegador
+consume la API; no es una lista de clientes autenticados. Si la infraestructura
+central publica frontend y API bajo el mismo origen, no suele hacer falta
+habilitar CORS adicional. La guía de [`k8s/README.md`](k8s/README.md) explica
+el despliegue y la configuración para Windows 10 CMD y PowerShell.
+
 ## Variables de entorno
 
 | Variable | Obligatoria | Descripción |
@@ -69,7 +79,7 @@ registrarse sus huellas SHA-256.
 ## Pruebas
 
 ```bash
-pytest -q tests/test_user_service.py
+pytest -q
 ```
 
 ## Arquitectura

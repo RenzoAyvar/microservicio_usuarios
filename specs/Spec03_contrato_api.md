@@ -17,14 +17,14 @@ El microservicio administra el registro, autenticación y consulta de perfiles d
 | Puerto interno FastAPI | 8000 |
 | Protocolo actual | HTTP |
 | Acceso previsto | Interno |
-| Base URL | Pendiente de configurar en Kubernetes |
+| Base URL interna | `http://users-api.app-pagos.svc.cluster.local:8000` |
 | Salud | `GET /api/health` |
 | Documentación | `/docs` |
 | Especificación OpenAPI | `/openapi.json` |
 
-En Kubernetes, los microservicios consumidores utilizarán el nombre DNS del Service de usuarios dentro del clúster.
-
-No se debe utilizar una IP fija ni una dirección pública como dependencia entre servicios.
+En Kubernetes, los microservicios consumidores utilizarán el DNS completo del
+Service `users-api` en el namespace `app-pagos`. La comunicación es interna al
+clúster; no se debe utilizar una IP fija ni una dirección pública.
 
 ## 2. Autenticación
 
@@ -61,8 +61,9 @@ La API Key se transmite mediante:
 X-API-Key: <api-key>
 ```
 
-El backend almacena únicamente SHA-256 de las claves configuradas en
-`INTERNAL_SERVICE_CREDENTIALS`. Cada consumidor debe declarar:
+El backend almacena únicamente huellas SHA-256 de las claves configuradas en
+`INTERNAL_SERVICE_CREDENTIALS` y compara las huellas en tiempo constante.
+Cada consumidor debe declarar:
 
 - `key_hashes`: una o varias huellas SHA-256.
 - `permissions`: permisos habilitados.
@@ -276,6 +277,10 @@ X-API-Key: <api-key>
 
 Permisos requeridos: `users:read_status`.
 
+Los consumidores autorizados llaman directamente al backend usando
+`http://users-api.app-pagos.svc.cluster.local:8000`. No deben invocar esta ruta
+a través del Gateway Nginx, que devuelve 404 para `/internal` y `/internal/`.
+
 Respuesta `200 OK`:
 
 ```json
@@ -295,33 +300,9 @@ Respuestas relevantes:
 - `404 Not Found`: el usuario no existe.
 
 El Gateway Nginx bloquea externamente todas las rutas bajo `/internal/`.
-Los microservicios autorizados deben invocar directamente el Service DNS
-`users-api:8000` dentro del clúster.
-```
-
-Respuesta propuesta:
-
-```json
-{
-  "id_usuario": 15,
-  "estado": true
-}
-```
-
-Esta ruta es una propuesta de ampliación y **todavía no está implementada**.
-
-Deberá estar protegida mediante un mecanismo de autenticación entre servicios y accesible únicamente desde la red interna autorizada.
-
-La consulta deberá devolver:
-
-| Situación | Respuesta propuesta |
-| Usuario existente y activo | `200 OK` |
-| Usuario inexistente | `404 Not Found` |
-| Usuario inactivo | `200 OK`, con `estado: false` |
-| Consumidor no autenticado | `401 Unauthorized` |
-| Consumidor sin permisos | `403 Forbidden` |
-
-La decisión de devolver el estado inactivo como `200` permite distinguir entre un usuario inexistente y uno existente pero inactivo. Los consumidores deberán aplicar sus propias reglas de negocio.
+Un usuario inactivo se devuelve con `200 OK` y `estado: false`, lo que permite
+distinguirlo de uno inexistente. Los consumidores aplican sus propias reglas
+de negocio.
 
 ## 5. Errores
 
@@ -350,9 +331,11 @@ Condiciones:
 - El backend FastAPI se expondrá mediante un Service de tipo `ClusterIP`.
 - MariaDB no tendrá exposición pública.
 - El gateway Nginx será el punto de entrada definido para las solicitudes de la aplicación.
-- Las integraciones internas utilizarán nombres DNS de los Services.
+- Las integraciones internas utilizarán
+  `http://users-api.app-pagos.svc.cluster.local:8000`.
 - No se utilizarán direcciones IP fijas como parte del contrato.
-- La autenticación entre servicios deberá definirse antes de habilitar operaciones internas protegidas.
+- Las llamadas internas protegidas usan `X-API-Key`, huellas SHA-256, consumidores
+  habilitados y permisos explícitos.
 
 ## 7. Responsabilidades del microservicio
 
@@ -391,14 +374,16 @@ La especificación OpenAPI se encuentra disponible en:
 
 Los equipos consumidores deberán revisar esta documentación para conocer los modelos, validaciones, respuestas y rutas realmente implementadas.
 
-## 9. Pendientes antes de habilitar la integración
+## 9. Consideraciones operativas
 
-1. Definir autenticación entre microservicios.
-2. Implementar una consulta interna por `id_usuario`.
-3. Definir permisos para cada consumidor.
-4. Confirmar el nombre DNS y puerto del Service de Kubernetes.
-5. Implementar una comprobación de disponibilidad de MariaDB.
-6. Revisar el almacenamiento de intentos fallidos para soportar varias réplicas.
-7. Configurar secretos fuera del repositorio.
+- Los intentos fallidos de inicio de sesión se guardan en memoria; mantener una
+  sola réplica de FastAPI hasta migrar ese estado a almacenamiento compartido y
+  persistente.
+- Las API Keys originales, sus secretos JWT y las contraseñas se proporcionan
+  mediante Kubernetes Secret y nunca se guardan en Git.
+- La disponibilidad pública HTTPS y su dominio corresponden a la infraestructura
+  central, no a este microservicio.
 
-**Estado final:** el contrato de los endpoints de registro, inicio de sesión, perfil y salud corresponde a la implementación actual. La consulta interna de usuarios y la autenticación entre microservicios son ampliaciones pendientes.
+**Estado:** la consulta interna por `id_usuario`, la autenticación de
+microservicios y el DNS de Kubernetes descritos en este contrato ya están
+implementados.
